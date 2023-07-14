@@ -13,11 +13,44 @@ from langchain.utils import get_from_dict_or_env
 logger = logging.getLogger(__name__)
 
 
+class _MinimaxEndpointClient(BaseModel):
+    """An API client that talks to a Minimax llm endpoint."""
+
+    group_id: str
+    api_key: str
+    api_url: str
+
+    @root_validator(pre=True)
+    def set_api_url(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        if "api_url" not in values:
+            host = "https://api.minimax.chat"
+            group_id = values["group_id"]
+            api_url = f"{host}/v1/text/chatcompletion?GroupId={group_id}"
+            values["api_url"] = api_url
+        return values
+
+    def post(self, request: Any) -> Any:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        response = requests.post(self.api_url, headers=headers, json=request)
+        # TODO: error handling and automatic retries
+        if not response.ok:
+            raise ValueError(f"HTTP {response.status_code} error: {response.text}")
+        if response.json()["base_resp"]["status_code"] > 0:
+            raise ValueError(
+                f"API {response.json()['base_resp']['status_code']}"
+                f" error: {response.json()['base_resp']['status_msg']}"
+            )
+        return response.json()["reply"]
+
+
 class _MinimaxCommon(BaseModel):
-    client: Any
+    client: _MinimaxEndpointClient = None  #: :meta private:
 
     model_name: str = "abab5-chat"
-    """Model name to use"""
+    """Model name to use, support 'abab5-chat' and 'abab5.5-chat'"""
 
     temperature: float = 0.9
     """What sampling temperature to use"""
@@ -27,7 +60,7 @@ class _MinimaxCommon(BaseModel):
 
     top_p: float = 0.95
     """Total probability mass of tokens to consider at each step."""
-    
+
     skip_info_mask: bool = False
     """De-sensitize text information in the output that might involve privacy issues."""
 
@@ -51,15 +84,21 @@ class _MinimaxCommon(BaseModel):
         values["minimax_api_key"] = get_from_dict_or_env(
             values, "minimax_api_key", "MINIMAX_API_KEY"
         )
+        values["client"] = _MinimaxEndpointClient(
+            api_key=values["minimax_api_key"],
+            group_id=values["minimax_group_id"],
+        )
         return values
 
     @property
     def _default_params(self) -> Dict[str, Any]:
         """Get the default parameters for calling GooseAI API."""
         normal_params = {
+            "model": self.model_name,
             "top_p": self.top_p,
             "temperature": self.temperature,
             "tokens_to_generate": self.tokens_to_generate,
+            "skip_info_mask": self.skip_info_mask,
         }
         return {**normal_params}
 
@@ -68,13 +107,8 @@ class _MinimaxCommon(BaseModel):
         """Get the identifying parameters."""
         return {**{"model_name": self.model_name}, **self._default_params}
 
-    @property
-    def _llm_type(self) -> str:
-        """Return type of llm."""
-        return "minimax"
 
-
-class MiniMaxCompletion(_MinimaxCommon, LLM):
+class MiniMaxCompletion(LLM, _MinimaxCommon):
     """Wrapper around Minimax large language models.
 
     To use, you should have the environment variable ``MINIMAX_GROUP_ID`` and
@@ -89,6 +123,11 @@ class MiniMaxCompletion(_MinimaxCommon, LLM):
 
     """
 
+    @property
+    def _llm_type(self) -> str:
+        """Return type of llm."""
+        return "minimax"
+
     def _call(
         self,
         prompt: str,
@@ -97,30 +136,9 @@ class MiniMaxCompletion(_MinimaxCommon, LLM):
         **kwargs: Any,
     ) -> str:
         """Call the MiniMax API."""
-        headers = {
-            "Authorization": f"Bearer {self.minimax_api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"https://api.minimax.chat/v1/text/chatcompletion?GroupId={self.minimax_group_id}"
-        payload = {
-            "model": "abab5-chat",
-            "messages": [{"sender_type": "USER", "text": prompt}],
-            "tokens_to_generate": self.tokens_to_generate,
-            "skip_info_mask": self.skip_info_mask,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
-        response = requests.post(url, headers=headers, json=payload)
-        parsed_response = response.json()
-        base_resp = parsed_response["base_resp"]
-        if base_resp["status_code"] != 0:
-            logger.error(base_resp["status_code"])
-            raise Exception(
-                "Post model outputs failed, status: " + base_resp["status_msg"]
-            )
-        text = parsed_response["reply"]
+        payload = self._default_params
+        payload["messages"] = [{"sender_type": "USER", "text": prompt}]
+        text = self.client.post(payload)
 
-        if stop is not None:
-            # This is required since the stop tokens are not enforced by the model parameters
-            text = enforce_stop_tokens(text, stop)
-        return text
+        # This is required since the stop are not enforced by the model parameters
+        return text if stop is None else enforce_stop_tokens(text, stop)
