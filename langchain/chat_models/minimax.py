@@ -1,9 +1,6 @@
 """Wrapper around Minimax chat models."""
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-
-import requests
+from typing import Any, List, Optional
 
 from langchain.callbacks.manager import (
     AsyncCallbackManagerForLLMRun,
@@ -15,16 +12,16 @@ from langchain.llms.utils import enforce_stop_tokens
 from langchain.schema import (
     AIMessage,
     BaseMessage,
-    ChatGeneration,
     ChatResult,
     HumanMessage,
-    SystemMessage,
 )
 
 logger = logging.getLogger(__name__)
 
-def _parse_message(type, text):
-    return {"sender_type": type, "text": text}
+
+def _parse_message(type_, text):
+    return {"sender_type": type_, "text": text}
+
 
 def _parse_chat_history(history: List[BaseMessage]):
     """Parse a sequence of messages into history."""
@@ -77,33 +74,12 @@ class MiniMaxChat(_MinimaxCommon, BaseChatModel):
                 "You should provide at least one message to start the chat!"
             )
         history = _parse_chat_history(messages)
-        headers = {
-            "Authorization": f"Bearer {self.minimax_api_key}",
-            "Content-Type": "application/json",
-        }
-        url = f"https://api.minimax.chat/v1/text/chatcompletion?GroupId={self.minimax_group_id}"
-        payload = {
-            "model": "abab5-chat",
-            "messages": history,
-            "tokens_to_generate": self.tokens_to_generate,
-            "skip_info_mask": self.skip_info_mask,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-        }
-        response = requests.post(url, headers=headers, json=payload)
-        parsed_response = response.json()
-        base_resp = parsed_response["base_resp"]
-        if base_resp["status_code"] != 0:
-            logger.error(base_resp["status_code"])
-            raise Exception(
-                "Post model outputs failed, status: " + base_resp["status_msg"]
-            )
-        text = parsed_response["reply"]
+        payload = self._default_params
+        payload["messages"] = history
+        text = self.client.post(payload)
 
-        if stop is not None:
-            # This is required since the stop tokens are not enforced by the model parameters
-            text = enforce_stop_tokens(text, stop)
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+        # This is required since the stop are not enforced by the model parameters
+        return text if stop is None else enforce_stop_tokens(text, stop)
 
     async def _agenerate(
         self,
